@@ -23,17 +23,7 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	mux.HandleFunc("GET /health", h.HealthCheck)
 
 	// Webhook ingestion — validates HMAC signature then records the event.
-	recorder := storage.NewRecorder(cfg.Store)
-	var webhookHandler http.Handler = recorder
-	if cfg.Secret != "" {
-		algo := cfg.Algorithm
-		if algo == "" {
-			algo = "sha256"
-		}
-		v := signature.NewValidator(cfg.Secret, algo)
-		webhookHandler = signature.Middleware(v, recorder)
-	}
-	mux.Handle("POST /hooks/{source}", webhookHandler)
+	mux.Handle("POST /hooks/{source}", buildWebhookHandler(cfg))
 
 	// Event inspection API
 	mux.HandleFunc("GET /events", h.ListEvents)
@@ -41,4 +31,20 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	mux.HandleFunc("DELETE /events/{id}", h.DeleteEvent)
 
 	return mux
+}
+
+// buildWebhookHandler constructs the handler for POST /hooks/{source}.
+// When a secret is configured it wraps the recorder with HMAC signature
+// validation; otherwise requests are accepted without authentication.
+func buildWebhookHandler(cfg RouterConfig) http.Handler {
+	recorder := storage.NewRecorder(cfg.Store)
+	if cfg.Secret == "" {
+		return recorder
+	}
+	algo := cfg.Algorithm
+	if algo == "" {
+		algo = "sha256"
+	}
+	v := signature.NewValidator(cfg.Secret, algo)
+	return signature.Middleware(v, recorder)
 }
