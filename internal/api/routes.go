@@ -3,48 +3,61 @@ package api
 import (
 	"net/http"
 
-	"github.com/hookwarden/internal/signature"
-	"github.com/hookwarden/internal/storage"
+	"github.com/yourusername/hookwarden/internal/replay"
+	"github.com/yourusername/hookwarden/internal/signature"
+	"github.com/yourusername/hookwarden/internal/storage"
 )
 
-// RouterConfig holds configuration for building the router.
+// RouterConfig holds dependencies needed to build the full HTTP router.
 type RouterConfig struct {
 	Store     storage.Store
-	Secret    string
-	Algorithm string // e.g. "sha256"
+	Replayer  *replay.Replayer
+	Validator *signature.Validator
+	WebhookPath string
 }
 
-// NewRouter wires up all routes and returns an http.Handler.
+// NewRouter constructs and returns the main HTTP mux for hookwarden.
 func NewRouter(cfg RouterConfig) http.Handler {
 	mux := http.NewServeMux()
-	h := NewHandler(cfg.Store)
 
-	// Health
-	mux.HandleFunc("GET /health", h.HealthCheck)
+	// Management API
+	eventHandler := NewHandler(cfg.Store)
+	mux.HandleFunc("/events", eventHandler.List)
+	mux.HandleFunc("/events/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			eventHandler.Get(w, r)
+		case http.MethodDelete:
+			eventHandler.Delete(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
-	// Webhook ingestion — validates HMAC signature then records the event.
-	mux.Handle("POST /hooks/{source}", buildWebhookHandler(cfg))
+	// Replay endpoint
+	replayHandler := NewReplayHandler(cfg.Store, cfg.Replayer)
+	mux.HandleFunc("/events/replay/", replayHandler.ServeHTTP)
 
-	// Event inspection API
-	mux.HandleFunc("GET /events", h.ListEvents)
-	mux.HandleFunc("GET /events/{id}", h.GetEvent)
-	mux.HandleFunc("DELETE /events/{id}", h.DeleteEvent)
+	// Stats endpoint
+	statsHandler := NewStatsHandler(cfg.Store)
+	mux.Handle("/stats", statsHandler)
+
+	// Webhook receiver
+	webhookPath := cfg.WebhookPath
+	if webhookPath == "" {
+		webhookPath = "/webhook"
+	}
+	mux.Handle(webhookPath, buildWebhookHandler(cfg.Store, cfg.Validator))
 
 	return mux
 }
 
-// buildWebhookHandler constructs the handler for POST /hooks/{source}.
-// When a secret is configured it wraps the recorder with HMAC signature
-// validation; otherwise requests are accepted without authentication.
-func buildWebhookHandler(cfg RouterConfig) http.Handler {
-	recorder := storage.NewRecorder(cfg.Store)
-	if cfg.Secret == "" {
-		return recorder
+// buildWebhookHandler wires the signature middleware and recorder for a webhook path.
+func buildWebhookHandler(store storage.Store, v *signature.Validator) http.Handler {
+	recorder := storage.NewRecorder(store)
+	var h http.Handler = recorder
+	if v != nil {
+		h = signature.Middleware(v, h)
 	}
-	algo := cfg.Algorithm
-	if algo == "" {
-		algo = "sha256"
-	}
-	v := signature.NewValidator(cfg.Secret, algo)
-	return signature.Middleware(v, recorder)
+	return h
 }
