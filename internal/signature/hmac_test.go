@@ -66,3 +66,16 @@ func TestVerify_MalformedHex(t *testing.T) {
 		t.Errorf("expected ErrInvalidSignature, got: %v", err)
 	}
 }
+
+func TestVerify_WrongSecret(t *testing.T) {
+	payload := []byte(`{"event":"push"}`)
+
+	// Compute a valid signature using one secret, then verify with a different secret.
+	signer := signature.NewValidator("correct-secret")
+	sig := "sha256=" + signer.Compute(payload)
+
+	verifier := signature.NewValidator("wrong-secret")
+	if err := verifier.Verify(payload, sig); err != signature.ErrInvalidSignature {
+		t.Errorf("expected ErrInvalidSignature when secret differs, got: %v", err)
+	}
+}
